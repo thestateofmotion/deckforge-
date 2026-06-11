@@ -9,7 +9,16 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
   <meta name="apple-mobile-web-app-title" content="DeckForge"/>
   <title>DeckForge</title>
+  <link rel="manifest" href="./manifest.json"/>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230c0c10'/%3E%3Ctext x='50' y='72' font-size='62' text-anchor='middle'%3E%F0%9F%83%8F%3C/text%3E%3C/svg%3E"/>
+  <script>
+    // PWA: register the service worker (no-op on file:// or unsupported browsers)
+    if ("serviceWorker" in navigator && location.protocol.startsWith("http")) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch(() => {});
+      });
+    }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com"/>
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
   <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap" rel="stylesheet"/>
@@ -46,7 +55,7 @@
 
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap');`;
-const VERSION = "0.23.0-beta";
+const VERSION = "0.24.0-beta";
 
 // ── PERSISTENCE ──────────────────────────────────────────────────
 const STORE_PREFIX = "deckforge.v1.";
@@ -312,6 +321,13 @@ const LB = { green:"rgba(104,211,145,0.12)", yellow:"rgba(246,173,85,0.12)", red
 const icsEscape  = (s) => String(s).replace(/\\/g,"\\\\").replace(/;/g,"\\;").replace(/,/g,"\\,").replace(/\n/g,"\\n");
 const icsDateVal = (key) => key.replace(/-/g,"");
 function nextDayVal(key) { const d = new Date(key+"T12:00:00"); d.setDate(d.getDate()+1); return icsDateVal(dateKey(d)); }
+// Timed events use floating local time so calendars place them in the viewer's zone
+const icsDT = (key, time) => `${icsDateVal(key)}T${time.replace(":","")}00`;
+function icsDTEnd(key, time, mins) {
+  const d = new Date(`${key}T${time}:00`);
+  d.setMinutes(d.getMinutes() + Math.max(15, mins || 30));
+  return `${icsDateVal(dateKey(d))}T${String(d.getHours()).padStart(2,"0")}${String(d.getMinutes()).padStart(2,"0")}00`;
+}
 
 const RRULES = {
   daily:    "FREQ=DAILY",
@@ -319,7 +335,7 @@ const RRULES = {
 };
 const ICS_DOW = ["SU","MO","TU","WE","TH","FR","SA"];
 
-function buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId, days = 30 }) {
+function buildCalendarEvents({ decks, cards, schedule, quickCards, deckTimes = {}, currentUserId, days = 30 }) {
   const events = [];
   for (let i = 0; i < days; i++) {
     const d = new Date(); d.setDate(d.getDate() + i);
@@ -331,6 +347,7 @@ function buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId
       const { totalMin } = calcCap(dc);
       events.push({
         id: `deck-${did}-${key}`, dayKey: key, kind: "deck",
+        time: deckTimes[key]?.[did] || null, durMin: totalMin,
         title: `${deck.icon} ${deck.name}`,
         desc: `DeckForge deck — ${dc.length} cards · ${fmtMins(totalMin)}\n` + dc.map(c => `• ${c.title} (${c.duration}m)`).join("\n"),
       });
@@ -338,6 +355,7 @@ function buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId
     (quickCards[key] || []).filter(q => !q.done).forEach(q => {
       events.push({
         id: `quick-${q.id}`, dayKey: key, kind: "quick",
+        time: q.time || null, durMin: q.duration || 30,
         title: `◌ ${q.title}`,
         desc: `DeckForge quick card · ${q.duration}m`,
       });
@@ -361,9 +379,13 @@ function buildICS(events) {
   events.forEach(ev => {
     lines.push("BEGIN:VEVENT",
       `UID:${ev.id}@deckforge`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART;VALUE=DATE:${icsDateVal(ev.dayKey)}`,
-      `DTEND;VALUE=DATE:${nextDayVal(ev.dayKey)}`,
+      `DTSTAMP:${stamp}`);
+    if (ev.time) {
+      lines.push(`DTSTART:${icsDT(ev.dayKey, ev.time)}`, `DTEND:${icsDTEnd(ev.dayKey, ev.time, ev.durMin)}`);
+    } else {
+      lines.push(`DTSTART;VALUE=DATE:${icsDateVal(ev.dayKey)}`, `DTEND;VALUE=DATE:${nextDayVal(ev.dayKey)}`);
+    }
+    lines.push(
       `SUMMARY:${icsEscape(ev.title)}`,
       `DESCRIPTION:${icsEscape(ev.desc)}`);
     if (ev.rrule) lines.push(`RRULE:${ev.rrule}`);
@@ -378,7 +400,9 @@ function gcalUrl(ev) {
     action: "TEMPLATE",
     text: ev.title,
     details: ev.desc,
-    dates: `${icsDateVal(ev.dayKey)}/${nextDayVal(ev.dayKey)}`,
+    dates: ev.time
+      ? `${icsDT(ev.dayKey, ev.time)}/${icsDTEnd(ev.dayKey, ev.time, ev.durMin)}`
+      : `${icsDateVal(ev.dayKey)}/${nextDayVal(ev.dayKey)}`,
   });
   if (ev.rrule) params.set("recur", "RRULE:" + ev.rrule);
   return "https://calendar.google.com/calendar/render?" + params.toString();
@@ -745,6 +769,18 @@ function ScopeBadge({ scope }) {
   return <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"8px", textTransform:"uppercase", color:"#A0AEC0", background:"rgba(160,174,192,0.12)", border:"1px solid rgba(160,174,192,0.2)", padding:"1px 6px", borderRadius:"4px" }}>shared</span>;
 }
 
+function TimeChip({ value, onChange, color="#63B3ED" }) {
+  return (
+    <span style={{ display:"inline-flex", alignItems:"center", gap:"2px", flexShrink:0 }} onClick={e=>e.stopPropagation()}>
+      <input type="time" value={value||""} onChange={e=>onChange(e.target.value||null)} title="Start time"
+        style={{ background:value?`${color}14`:"rgba(255,255,255,0.04)", border:`1px solid ${value?color+"44":"rgba(255,255,255,0.1)"}`,
+          color:value?color:"rgba(255,255,255,0.35)", fontFamily:"'DM Mono',monospace", fontSize:"10px",
+          borderRadius:"7px", padding:"2px 4px", outline:"none", colorScheme:"dark", cursor:"pointer" }}/>
+      {value&&<button onClick={()=>onChange(null)} title="Clear time" style={{ background:"none", border:"none", color:"rgba(255,255,255,0.25)", fontSize:"10px", cursor:"pointer", padding:"0 2px" }}>✕</button>}
+    </span>
+  );
+}
+
 function ViewPane({ children, k }) {
   const [a,setA]=useState(false);
   useEffect(()=>{ const id=setTimeout(()=>setA(true),20); return()=>clearTimeout(id); },[k]);
@@ -1039,6 +1075,124 @@ function StatsPanel({ sessions, currentUserId }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ── WEEKLY REVIEW ─────────────────────────────────────────────────
+function ReviewView({ sessions, quickCards, currentUserId }) {
+  const me = MEMBERS[currentUserId];
+
+  function rangeKeys(offsetDays) {
+    // 7 day keys ending (today - offsetDays)
+    return Array.from({ length: 7 }, (_, i) => daysAgo(offsetDays + 6 - i));
+  }
+  const thisWeek = rangeKeys(0);
+  const lastWeek = rangeKeys(7);
+
+  function weekStats(keys) {
+    const sess = sessions.filter(s => s.ownerId === currentUserId && keys.includes(s.dayKey));
+    const quickDone = keys.flatMap(k => (quickCards[k] || []).filter(q => q.done));
+    const minutes = sess.reduce((s, x) => s + x.duration, 0) + quickDone.reduce((s, q) => s + (q.duration || 0), 0);
+    const energy  = sess.reduce((s, x) => s + x.duration * ((x.energy || 2) / 5), 0);
+    const byCat = {};
+    sess.forEach(x => { byCat[x.category] = (byCat[x.category] || 0) + x.duration; });
+    quickDone.forEach(q => { byCat[q.category] = (byCat[q.category] || 0) + (q.duration || 0); });
+    const byDay = keys.map(k => ({
+      key: k,
+      min: sessions.filter(s => s.ownerId === currentUserId && s.dayKey === k).reduce((s, x) => s + x.duration, 0)
+         + ((quickCards[k] || []).filter(q => q.done).reduce((s, q) => s + (q.duration || 0), 0)),
+    }));
+    return { count: sess.length + quickDone.length, minutes, energy, byCat, byDay };
+  }
+
+  const cur  = weekStats(thisWeek);
+  const prev = weekStats(lastWeek);
+  const maxDay = Math.max(30, ...cur.byDay.map(d => d.min));
+  const maxCat = Math.max(1, ...Object.values(cur.byCat));
+  const catRows = Object.entries(cur.byCat).sort((a, b) => b[1] - a[1]);
+  const bestDay = cur.byDay.reduce((b, d) => d.min > (b?.min || 0) ? d : b, null);
+
+  function delta(now, before) {
+    if (!before) return now ? "new" : "—";
+    const pct = Math.round(((now - before) / before) * 100);
+    return (pct >= 0 ? "+" : "") + pct + "%";
+  }
+  const deltaColor = (now, before) => !before ? "rgba(255,255,255,0.3)" : now >= before ? "#68D391" : "#F6AD55";
+
+  const dayName = (key) => new Date(key + "T12:00:00").toLocaleDateString("en-US", { weekday: "short" });
+
+  return (
+    <div>
+      <div style={{ fontSize:"22px", marginBottom:"4px" }}>Weekly Review</div>
+      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.28)", marginBottom:"16px" }}>
+        Last 7 days · {me.name} · compared to the week before
+      </div>
+
+      {/* Headline stats */}
+      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:"8px", marginBottom:"16px" }}>
+        {[
+          ["COMPLETED", cur.count, prev.count, ""],
+          ["FOCUS TIME", fmtMins(cur.minutes), prev.minutes, ""],
+          ["ENERGY SPENT", Math.round(cur.energy), Math.round(prev.energy), " pts"],
+        ].map(([label, val, before, suffix]) => {
+          const now = label === "FOCUS TIME" ? cur.minutes : label === "COMPLETED" ? cur.count : cur.energy;
+          return (
+            <div key={label} style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:"12px", padding:"12px" }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"8px", color:"rgba(255,255,255,0.3)", letterSpacing:"0.08em", marginBottom:"6px" }}>{label}</div>
+              <div style={{ fontFamily:"'Bebas Neue',sans-serif", fontSize:"26px", color:"#f0ede8", lineHeight:1 }}>{val}{suffix}</div>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", marginTop:"5px", color:deltaColor(now, before) }}>
+                {delta(now, before)} vs prior week
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Day-by-day bars */}
+      <div style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:"14px", padding:"14px", marginBottom:"14px" }}>
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.08em", marginBottom:"12px" }}>
+          MINUTES PER DAY
+          {bestDay?.min > 0 && <span style={{ color:"#F6AD55", marginLeft:"8px" }}>★ best: {dayName(bestDay.key)} ({fmtMins(bestDay.min)})</span>}
+        </div>
+        <div style={{ display:"flex", gap:"6px", alignItems:"flex-end", height:"90px" }}>
+          {cur.byDay.map(d => (
+            <div key={d.key} style={{ flex:1, display:"flex", flexDirection:"column", alignItems:"center", gap:"4px", height:"100%", justifyContent:"flex-end" }}>
+              {d.min > 0 && <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"8px", color:"rgba(255,255,255,0.35)" }}>{d.min}</span>}
+              <div style={{ width:"100%", borderRadius:"4px 4px 0 0", height:`${Math.max(3, (d.min / maxDay) * 64)}px`,
+                background: d.key === todayKey ? "linear-gradient(to top,#FC814A,#F6AD55)" : d.min > 0 ? `${me.color}66` : "rgba(255,255,255,0.05)",
+                transition:"height 0.3s" }}/>
+              <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"8px", color: d.key === todayKey ? "#F6AD55" : "rgba(255,255,255,0.25)" }}>{dayName(d.key)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Category breakdown */}
+      <div style={{ background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:"14px", padding:"14px" }}>
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.08em", marginBottom:"12px" }}>WHERE THE TIME WENT</div>
+        {catRows.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"18px 0", fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.2)" }}>
+            Nothing completed this week yet — play a deck to start the story
+          </div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:"9px" }}>
+            {catRows.map(([k, min]) => {
+              const cat = getCat(k);
+              return (
+                <div key={k} style={{ display:"flex", alignItems:"center", gap:"9px" }}>
+                  <span style={{ fontSize:"12px", width:"18px", textAlign:"center", flexShrink:0 }}>{cat.emoji}</span>
+                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.5)", width:"70px", flexShrink:0 }}>{cat.label}</span>
+                  <div style={{ flex:1, height:"8px", background:"rgba(255,255,255,0.05)", borderRadius:"4px", overflow:"hidden" }}>
+                    <div style={{ height:"100%", width:`${(min / maxCat) * 100}%`, background:`linear-gradient(90deg,${cat.color}cc,${cat.color}66)`, borderRadius:"4px", transition:"width 0.4s" }}/>
+                  </div>
+                  <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:cat.color, width:"52px", textAlign:"right", flexShrink:0 }}>{fmtMins(min)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -1437,7 +1591,7 @@ function NewCardModal({ uid, onSave, onDelete, onClose, initialData=null }) {
 }
 
 // ── PLANNER ───────────────────────────────────────────────────────
-function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuickChange, archive, onArchiveChange, retentionDays, onRetentionChange, onSaveToLibrary, capMode, onCapModeChange, customMin, customEnergy, currentUserId, onUpdateCard, onLaunchSession, completedIds, onSetCompletedIds, currentEnergy, onEnergyChange, onEditCard, onDeleteCard, sharedArchive, onSharedArchive, completedSessions }) {
+function Planner({ decks, cards, schedule, onScheduleChange, deckTimes, onDeckTimesChange, quickCards, onQuickChange, archive, onArchiveChange, retentionDays, onRetentionChange, onSaveToLibrary, capMode, onCapModeChange, customMin, customEnergy, currentUserId, onUpdateCard, onLaunchSession, completedIds, onSetCompletedIds, currentEnergy, onEnergyChange, onEditCard, onDeleteCard, sharedArchive, onSharedArchive, completedSessions }) {
   const [calMode,      setCalMode]      = useState("month");
   const [cursor,       setCursor]       = useState(new Date(today()));
   const [selDay,       setSelDay]       = useState(todayKey);
@@ -1451,9 +1605,67 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
   const [editRetention,setEditRetention]= useState(false);
   const [playDeck,     setPlayDeck]     = useState(null);
   const [showSync,     setShowSync]     = useState(false);
+  const [qTime,        setQTime]        = useState(null);
+
+  // ── Drag-to-reschedule ──
+  const [drag, setDragState] = useState(null); // {deckId, fromDay, x, y, overDay}
+  const dragRef = useRef(null);
+  function setDrag(v) { dragRef.current = v; setDragState(v); }
+
+  function setDeckTime(dayKey, deckId, time) {
+    onDeckTimesChange({
+      ...deckTimes,
+      [dayKey]: { ...(deckTimes[dayKey] || {}), [deckId]: time || undefined },
+    });
+  }
+
+  function moveDeck(deckId, fromDay, toDay) {
+    if (!toDay || fromDay === toDay) return;
+    const next = { ...schedule };
+    next[fromDay] = (next[fromDay] || []).filter(id => id !== deckId);
+    if (!(next[toDay] || []).includes(deckId)) next[toDay] = [...(next[toDay] || []), deckId];
+    onScheduleChange(next);
+    const t = deckTimes[fromDay]?.[deckId];
+    if (t) {
+      onDeckTimesChange({
+        ...deckTimes,
+        [fromDay]: { ...(deckTimes[fromDay] || {}), [deckId]: undefined },
+        [toDay]:   { ...(deckTimes[toDay]   || {}), [deckId]: t },
+      });
+    }
+    setSelDay(toDay);
+  }
+
+  function startDeckDrag(e, deckId, fromDay) {
+    e.stopPropagation(); e.preventDefault();
+    setDrag({ deckId, fromDay, x: e.clientX, y: e.clientY, overDay: null });
+  }
+
+  useEffect(() => {
+    if (!drag) return;
+    const move = (e) => {
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const cell = el?.closest?.("[data-daykey]");
+      setDrag({ ...dragRef.current, x: e.clientX, y: e.clientY, overDay: cell?.dataset.daykey || null });
+    };
+    const up = () => {
+      const d = dragRef.current;
+      setDrag(null);
+      if (d?.overDay) moveDeck(d.deckId, d.fromDay, d.overDay);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+    return () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+    };
+  }, [drag !== null]);
 
   const myDecks  = decks.filter(d=>d.ownerId===currentUserId||d.scope==="shared");
-  const selDecks = (schedule[selDay]||[]).map(id=>decks.find(d=>d.id===id)).filter(Boolean);
+  const selDecks = (schedule[selDay]||[]).map(id=>decks.find(d=>d.id===id)).filter(Boolean)
+    .sort((a,b)=>{ const ta=deckTimes[selDay]?.[a.id], tb=deckTimes[selDay]?.[b.id]; if(ta&&tb) return ta.localeCompare(tb); if(ta) return -1; if(tb) return 1; return 0; });
   const selDate  = selDay ? new Date(selDay+"T12:00:00") : null;
   const isToday  = selDay===todayKey;
 
@@ -1471,10 +1683,14 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
 
   function addQuick() {
     if (!qTitle.trim()) return;
-    const qc = { id:"q"+Date.now(), title:qTitle.trim(), category:qCat, duration:qDur, done:false };
+    const qc = { id:"q"+Date.now(), title:qTitle.trim(), category:qCat, duration:qDur, time:qTime||null, done:false };
     onQuickChange({ ...quickCards, [selDay]: [...dayQuick(selDay), qc] });
-    setQTitle(""); setQDur(25); setShowQuickForm(false);
+    setQTitle(""); setQDur(25); setQTime(null); setShowQuickForm(false);
   }
+  function setQuickTime(qid, time) {
+    onQuickChange({ ...quickCards, [selDay]: dayQuick(selDay).map(q => q.id===qid ? {...q, time: time||null} : q) });
+  }
+  const sortedQuick = (key) => [...dayQuick(key)].sort((a,b)=>{ if(a.time&&b.time) return a.time.localeCompare(b.time); if(a.time) return -1; if(b.time) return 1; return 0; });
   function deleteQuick(qid) {
     onQuickChange({ ...quickCards, [selDay]: dayQuick(selDay).filter(q => q.id !== qid) });
   }
@@ -1625,6 +1841,19 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
   // Calendar view
   return (
     <div>
+      {/* ── DRAG GHOST ── */}
+      {drag && (()=>{ const dk=decks.find(d=>d.id===drag.deckId); return dk ? (
+        <div style={{ position:"fixed", left:drag.x, top:drag.y, transform:"translate(-50%,-130%)", zIndex:999, pointerEvents:"none",
+          background:"rgba(20,20,28,0.96)", border:`1px solid ${dk.color}66`, boxShadow:`0 8px 24px rgba(0,0,0,0.6), 0 0 14px ${dk.color}33`,
+          borderRadius:"10px", padding:"7px 12px", display:"flex", alignItems:"center", gap:"7px", whiteSpace:"nowrap" }}>
+          <span style={{ fontSize:"14px" }}>{dk.icon}</span>
+          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"11px", color:"#f0ede8" }}>{dk.name}</span>
+          <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:drag.overDay?"#63B3ED":"rgba(255,255,255,0.3)" }}>
+            {drag.overDay ? `→ ${drag.overDay.slice(5).replace("-","/")}` : "drop on a day"}
+          </span>
+        </div>
+      ) : null; })()}
+
       {/* ── STATS PANEL ── */}
       <StatsPanel sessions={completedSessions} currentUserId={currentUserId}/>
 
@@ -1655,8 +1884,9 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
             if(!d) return <div key={`e${i}`}/>;
             const key=dateKey(d), ids=schedule[key]||[], isSel=key===selDay, isTod=key===todayKey, light=dayLight(key), hasRecur=cards.some(c=>cardOccursOn(c,key)&&c.ownerId===currentUserId);
             const hasSess = completedSessions.some(s=>s.dayKey===key&&s.ownerId===currentUserId);
+            const isDrop = drag && drag.overDay===key;
             return (
-              <div key={key} onClick={()=>setSelDay(key)} style={{ aspectRatio:"1", borderRadius:"9px", padding:"3px", background:isSel?"rgba(255,255,255,0.1)":isTod?"rgba(255,255,255,0.04)":"transparent", border:`1px solid ${isSel?"rgba(255,255,255,0.2)":isTod?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.04)"}`, cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:"2px", transition:"all 0.12s" }}>
+              <div key={key} data-daykey={key} onClick={()=>setSelDay(key)} style={{ aspectRatio:"1", borderRadius:"9px", padding:"3px", background:isDrop?"rgba(99,179,237,0.18)":isSel?"rgba(255,255,255,0.1)":isTod?"rgba(255,255,255,0.04)":"transparent", border:`1px solid ${isDrop?"#63B3ED":isSel?"rgba(255,255,255,0.2)":isTod?"rgba(255,255,255,0.1)":"rgba(255,255,255,0.04)"}`, cursor:"pointer", display:"flex", flexDirection:"column", alignItems:"center", gap:"2px", transition:"all 0.12s" }}>
                 <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"11px", color:isTod?"#F6AD55":isSel?"#f0ede8":"rgba(255,255,255,0.45)", fontWeight:isTod?"bold":"normal" }}>{d.getDate()}</span>
                 {ids.length>0&&<div style={{ display:"flex", gap:"2px", flexWrap:"wrap", justifyContent:"center" }}>{ids.slice(0,3).map(id=>{ const dk=decks.find(x=>x.id===id); return dk?<div key={id} style={{ width:"4px", height:"4px", borderRadius:"50%", background:dk.color }}/>:null; })}</div>}
                 {ids.length>0&&<div style={{ width:"4px", height:"4px", borderRadius:"50%", background:LC[light], opacity:0.7 }}/>}
@@ -1673,8 +1903,9 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
         <div style={{ display:"grid", gridTemplateColumns:"repeat(7,1fr)", gap:"4px", marginBottom:"16px" }}>
           {buildWeek().map(d=>{
             const key=dateKey(d), ids=schedule[key]||[], isSel=key===selDay, isTod=key===todayKey, light=dayLight(key), load=dayLoad(key);
+            const isDrop = drag && drag.overDay===key;
             return (
-              <div key={key} onClick={()=>setSelDay(key)} style={{ borderRadius:"11px", padding:"7px 5px", background:isSel?"rgba(255,255,255,0.08)":isTod?"rgba(255,255,255,0.03)":"rgba(255,255,255,0.02)", border:`1px solid ${isSel?"rgba(255,255,255,0.16)":isTod?"rgba(255,255,255,0.09)":"rgba(255,255,255,0.04)"}`, cursor:"pointer", minHeight:"80px", display:"flex", flexDirection:"column", alignItems:"center", gap:"3px", transition:"all 0.12s" }}>
+              <div key={key} data-daykey={key} onClick={()=>setSelDay(key)} style={{ borderRadius:"11px", padding:"7px 5px", background:isDrop?"rgba(99,179,237,0.18)":isSel?"rgba(255,255,255,0.08)":isTod?"rgba(255,255,255,0.03)":"rgba(255,255,255,0.02)", border:`1px solid ${isDrop?"#63B3ED":isSel?"rgba(255,255,255,0.16)":isTod?"rgba(255,255,255,0.09)":"rgba(255,255,255,0.04)"}`, cursor:"pointer", minHeight:"80px", display:"flex", flexDirection:"column", alignItems:"center", gap:"3px", transition:"all 0.12s" }}>
                 <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:isTod?"#F6AD55":isSel?"#f0ede8":"rgba(255,255,255,0.38)", fontWeight:isTod?"bold":"normal" }}>{d.getDate()}</span>
                 <div style={{ display:"flex", flexDirection:"column", gap:"2px", width:"100%" }}>
                   {ids.map(id=>{ const dk=decks.find(x=>x.id===id); return dk?<div key={id} style={{ background:`${dk.color}22`, border:`1px solid ${dk.color}44`, borderRadius:"4px", padding:"1px 3px", display:"flex", alignItems:"center", gap:"2px" }}><span style={{ fontSize:"8px" }}>{dk.icon}</span><span style={{ fontFamily:"'DM Mono',monospace", fontSize:"7px", color:dk.color, overflow:"hidden", whiteSpace:"nowrap", textOverflow:"ellipsis" }}>{dk.name}</span></div>:null; })}
@@ -1781,16 +2012,19 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
               const light=getLight(totalMin,bMin);
               return (
                 <SwipeableRow key={deck.id} onEdit={null} onRemove={()=>toggleDeck(deck.id)} removeLabel="Unschedule">
-                  <div style={{ background:`${deck.color}0d`, border:`1px solid ${deck.color}33`, borderRadius:"12px", padding:"10px 12px", display:"flex", alignItems:"center", gap:"10px" }}>
+                  <div style={{ background:`${deck.color}0d`, border:`1px solid ${deck.color}33`, borderRadius:"12px", padding:"10px 8px 10px 4px", display:"flex", alignItems:"center", gap:"7px" }}>
+                    <span onPointerDown={e=>startDeckDrag(e, deck.id, selDay)} title="Drag to another day"
+                      style={{ fontFamily:"'DM Mono',monospace", fontSize:"13px", color:"rgba(255,255,255,0.22)", cursor:"grab", touchAction:"none", padding:"6px 4px", userSelect:"none", flexShrink:0 }}>⠿</span>
                     <span style={{ fontSize:"18px" }}>{deck.icon}</span>
-                    <div style={{ flex:1 }}>
-                      <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"14px", color:"#f0ede8" }}>{deck.name}</div>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"14px", color:"#f0ede8", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{deck.name}</div>
                       <div style={{ display:"flex", alignItems:"center", gap:"6px", marginTop:"2px" }}>
                         <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.32)" }}>{dc.length} cards · {fmtMins(totalMin)}</span>
                         <div style={{ width:"5px", height:"5px", borderRadius:"50%", background:LC[light] }}/>
                       </div>
                     </div>
-                    <button onClick={()=>{ setPlayDeck(deck); onSetCompletedIds([]); }} style={{ background:`${deck.color}cc`, border:"none", color:"#0c0c10", fontFamily:"'DM Mono',monospace", fontSize:"10px", fontWeight:500, padding:"6px 13px", borderRadius:"8px", cursor:"pointer", letterSpacing:"0.04em" }}>▶ Play</button>
+                    <TimeChip value={deckTimes[selDay]?.[deck.id]||null} onChange={t=>setDeckTime(selDay, deck.id, t)} color={deck.color}/>
+                    <button onClick={()=>{ setPlayDeck(deck); onSetCompletedIds([]); }} style={{ background:`${deck.color}cc`, border:"none", color:"#0c0c10", fontFamily:"'DM Mono',monospace", fontSize:"10px", fontWeight:500, padding:"6px 13px", borderRadius:"8px", cursor:"pointer", letterSpacing:"0.04em", flexShrink:0 }}>▶ Play</button>
                   </div>
                 </SwipeableRow>
               );
@@ -1862,7 +2096,7 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
 
           {dayQuick(selDay).length>0&&(
             <div style={{ display:"flex", flexDirection:"column", gap:"6px", marginBottom:"8px" }}>
-              {dayQuick(selDay).map(qc=>{
+              {sortedQuick(selDay).map(qc=>{
                 const cat=CATS[qc.category]||CATS.Work;
                 return (
                   <SwipeableRow key={qc.id} onEdit={null} onRemove={()=>deleteQuick(qc.id)} removeLabel="Delete">
@@ -1875,8 +2109,11 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
                         </div>
                         <div style={{ flex:1, minWidth:0 }}>
                           <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"13px", color:qc.done?"rgba(255,255,255,0.35)":"#f0ede8", textDecoration:qc.done?"line-through":"none", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", transition:"all 0.2s" }}>{qc.title}</div>
-                          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", marginTop:"1px" }}>{cat.emoji} {cat.label} · {qc.duration}m</div>
+                          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", marginTop:"1px" }}>
+                            {qc.done&&qc.time&&<span style={{ color:cat.color }}>{qc.time} · </span>}{cat.emoji} {cat.label} · {qc.duration}m
+                          </div>
                         </div>
+                        {!qc.done&&<TimeChip value={qc.time||null} onChange={t=>setQuickTime(qc.id, t)} color={cat.color}/>}
                         {!qc.done ? (
                           <button onClick={()=>onLaunchSession({ id:qc.id, title:qc.title, category:qc.category, duration:qc.duration, energy:2, desc:"", tags:[], suitName:cat.label, scope:"personal", ownerId:currentUserId }, null, selDay)}
                             style={{ background:`${cat.color}cc`, border:"none", color:"#0c0c10", fontFamily:"'DM Mono',monospace", fontSize:"10px", fontWeight:500, padding:"5px 11px", borderRadius:"8px", cursor:"pointer", letterSpacing:"0.04em", flexShrink:0 }}>▶</button>
@@ -1915,6 +2152,7 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
                   <button onClick={()=>setQDur(d=>Math.max(5,d-5))} style={{ width:"24px", height:"24px", borderRadius:"50%", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", color:"#fff", fontSize:"14px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>−</button>
                   <span style={{ fontFamily:"'DM Mono',monospace", fontSize:"11px", color:"#f0ede8", minWidth:"32px", textAlign:"center" }}>{qDur}m</span>
                   <button onClick={()=>setQDur(d=>Math.min(180,d+5))} style={{ width:"24px", height:"24px", borderRadius:"50%", background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.1)", color:"#fff", fontSize:"14px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>+</button>
+                  <TimeChip value={qTime} onChange={setQTime}/>
                 </div>
               </div>
               <div style={{ display:"flex", gap:"6px" }}>
@@ -1996,7 +2234,7 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
       {/* Calendar sync & backup sheet */}
       {showSync&&(
         <CalendarSyncSheet decks={decks} cards={cards} schedule={schedule} quickCards={quickCards}
-          currentUserId={currentUserId} onClose={()=>setShowSync(false)}/>
+          deckTimes={deckTimes} currentUserId={currentUserId} onClose={()=>setShowSync(false)}/>
       )}
 
       {/* Deck picker sheet */}
@@ -2438,10 +2676,10 @@ function VoiceReviewSheet({ cards, transcript, onConfirm, onDismiss }) {
 }
 
 // ── CALENDAR SYNC & BACKUP SHEET ──────────────────────────────────
-function CalendarSyncSheet({ decks, cards, schedule, quickCards, currentUserId, onClose }) {
+function CalendarSyncSheet({ decks, cards, schedule, quickCards, deckTimes, currentUserId, onClose }) {
   const [status, setStatus] = useState(null);
   const fileRef = useRef(null);
-  const events = buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId });
+  const events = buildCalendarEvents({ decks, cards, schedule, quickCards, deckTimes, currentUserId });
 
   function dayLabel(key) {
     if (key === todayKey) return "Today";
@@ -2496,6 +2734,7 @@ function CalendarSyncSheet({ decks, cards, schedule, quickCards, currentUserId, 
                   <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"13px", color:"#f0ede8", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ev.title}</div>
                   <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", marginTop:"1px" }}>
                     {ev.rrule ? "repeats " + (cards.find(c=>`recur-${c.id}`===ev.id)?.recurrence || "weekly") : dayLabel(ev.dayKey)}
+                    {ev.time && <span style={{ color:"#63B3ED" }}> · {ev.time}</span>}
                   </div>
                 </div>
                 <a href={gcalUrl(ev)} target="_blank" rel="noopener noreferrer"
@@ -2608,6 +2847,7 @@ function App() {
   const [cards,      setCards]      = usePersistentState("cards", SEED_CARDS);
   const [decks,      setDecks]      = usePersistentState("decks", SEED_DECKS);
   const [schedule,   setSchedule]   = usePersistentState("schedule", SEED_SCHED);
+  const [deckTimes,  setDeckTimes]  = usePersistentState("deckTimes", {}); // {dayKey: {deckId: "HH:MM"}}
   const [requests,   setRequests]   = usePersistentState("requests", SEED_REQS);
   const [shared,     setShared]     = usePersistentState("shared", SEED_SHARED);
   const [filterCat,  setFilterCat]  = useState("All");
@@ -2850,7 +3090,7 @@ function App() {
   }
 
   const visLib = filterCat==="All"?myCards:myCards.filter(c=>c.category===filterCat);
-  const NAV=[["library","Library"],["shared","Shared"],["inbox","Inbox"],["builder","Builder"],["planner","Planner"]];
+  const NAV=[["library","Library"],["shared","Shared"],["inbox","Inbox"],["builder","Builder"],["planner","Planner"],["review","Review"]];
 
   return (
     <>
@@ -3049,10 +3289,16 @@ function App() {
               </div>
             )}
 
+            {/* REVIEW */}
+            {view==="review"&&(
+              <ReviewView sessions={completedSessions} quickCards={quickCards} currentUserId={uid}/>
+            )}
+
             {/* PLANNER */}
             {view==="planner"&&(
               <Planner
                 decks={decks} cards={cards} schedule={schedule} onScheduleChange={setSchedule}
+                deckTimes={deckTimes} onDeckTimesChange={setDeckTimes}
                 quickCards={quickCards} onQuickChange={setQuickCards}
                 archive={archive} onArchiveChange={setArchive}
                 retentionDays={retentionDays} onRetentionChange={setRetentionDays}

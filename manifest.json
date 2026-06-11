@@ -1,0 +1,14 @@
+{
+  "name": "DeckForge",
+  "short_name": "DeckForge",
+  "description": "Card-based household planning — build decks of tasks, budget time and energy, play through your day.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0c0c10",
+  "theme_color": "#0c0c10",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
