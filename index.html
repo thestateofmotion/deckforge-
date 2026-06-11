@@ -46,7 +46,7 @@
 
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap');`;
-const VERSION = "0.22.0-beta";
+const VERSION = "0.23.0-beta";
 
 // ── PERSISTENCE ──────────────────────────────────────────────────
 const STORE_PREFIX = "deckforge.v1.";
@@ -306,6 +306,125 @@ const calcCap = (dc) => ({ totalMin:dc.reduce((s,c)=>s+c.duration,0), energyLoad
 const getLight= (u,b) => { if(!b) return "green"; const p=u/b; return p>=0.9?"red":p>=0.7?"yellow":"green"; }
 const LC = { green:"#68D391", yellow:"#F6AD55", red:"#F56565" };
 const LB = { green:"rgba(104,211,145,0.12)", yellow:"rgba(246,173,85,0.12)", red:"rgba(245,101,101,0.12)" };
+
+// ── CALENDAR EXPORT ───────────────────────────────────────────────
+// Scheduled decks, quick cards, and recurring cards become all-day events.
+const icsEscape  = (s) => String(s).replace(/\\/g,"\\\\").replace(/;/g,"\\;").replace(/,/g,"\\,").replace(/\n/g,"\\n");
+const icsDateVal = (key) => key.replace(/-/g,"");
+function nextDayVal(key) { const d = new Date(key+"T12:00:00"); d.setDate(d.getDate()+1); return icsDateVal(dateKey(d)); }
+
+const RRULES = {
+  daily:    "FREQ=DAILY",
+  weekdays: "FREQ=WEEKLY;BYDAY=MO,TU,WE,TH,FR",
+};
+const ICS_DOW = ["SU","MO","TU","WE","TH","FR","SA"];
+
+function buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId, days = 30 }) {
+  const events = [];
+  for (let i = 0; i < days; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i);
+    const key = dateKey(d);
+    (schedule[key] || []).forEach(did => {
+      const deck = decks.find(x => x.id === did);
+      if (!deck) return;
+      const dc = cards.filter(c => deck.cardIds.includes(c.id));
+      const { totalMin } = calcCap(dc);
+      events.push({
+        id: `deck-${did}-${key}`, dayKey: key, kind: "deck",
+        title: `${deck.icon} ${deck.name}`,
+        desc: `DeckForge deck — ${dc.length} cards · ${fmtMins(totalMin)}\n` + dc.map(c => `• ${c.title} (${c.duration}m)`).join("\n"),
+      });
+    });
+    (quickCards[key] || []).filter(q => !q.done).forEach(q => {
+      events.push({
+        id: `quick-${q.id}`, dayKey: key, kind: "quick",
+        title: `◌ ${q.title}`,
+        desc: `DeckForge quick card · ${q.duration}m`,
+      });
+    });
+  }
+  cards.filter(c => c.ownerId === currentUserId && c.recurrence && c.recurrence !== "none").forEach(c => {
+    const rrule = RRULES[c.recurrence] || `FREQ=WEEKLY;BYDAY=${ICS_DOW[c.recurDow ?? new Date().getDay()]}`;
+    events.push({
+      id: `recur-${c.id}`, dayKey: todayKey, kind: "recurring",
+      title: `↻ ${c.title}`,
+      desc: `DeckForge recurring card · ${c.duration}m`,
+      rrule,
+    });
+  });
+  return events.sort((a, b) => a.dayKey.localeCompare(b.dayKey));
+}
+
+function buildICS(events) {
+  const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d+/, "");
+  const lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//DeckForge//Planner//EN", "CALSCALE:GREGORIAN", "X-WR-CALNAME:DeckForge"];
+  events.forEach(ev => {
+    lines.push("BEGIN:VEVENT",
+      `UID:${ev.id}@deckforge`,
+      `DTSTAMP:${stamp}`,
+      `DTSTART;VALUE=DATE:${icsDateVal(ev.dayKey)}`,
+      `DTEND;VALUE=DATE:${nextDayVal(ev.dayKey)}`,
+      `SUMMARY:${icsEscape(ev.title)}`,
+      `DESCRIPTION:${icsEscape(ev.desc)}`);
+    if (ev.rrule) lines.push(`RRULE:${ev.rrule}`);
+    lines.push("END:VEVENT");
+  });
+  lines.push("END:VCALENDAR");
+  return lines.join("\r\n");
+}
+
+function gcalUrl(ev) {
+  const params = new URLSearchParams({
+    action: "TEMPLATE",
+    text: ev.title,
+    details: ev.desc,
+    dates: `${icsDateVal(ev.dayKey)}/${nextDayVal(ev.dayKey)}`,
+  });
+  if (ev.rrule) params.set("recur", "RRULE:" + ev.rrule);
+  return "https://calendar.google.com/calendar/render?" + params.toString();
+}
+
+function downloadFile(name, content, mime) {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+// ── BACKUP / RESTORE ──────────────────────────────────────────────
+// The API key is deliberately excluded from backups.
+function exportBackup() {
+  const data = {};
+  try {
+    Object.keys(localStorage)
+      .filter(k => k.startsWith(STORE_PREFIX) && k !== API_KEY_STORE)
+      .forEach(k => { try { data[k.slice(STORE_PREFIX.length)] = JSON.parse(localStorage.getItem(k)); } catch {} });
+  } catch {}
+  downloadFile(
+    `deckforge-backup-${todayKey}.json`,
+    JSON.stringify({ app: "deckforge", version: VERSION, exportedAt: new Date().toISOString(), data }, null, 2),
+    "application/json"
+  );
+}
+
+function importBackup(file, onDone) {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const parsed = JSON.parse(r.result);
+      if (!parsed || parsed.app !== "deckforge" || typeof parsed.data !== "object") throw new Error("not a DeckForge backup");
+      Object.entries(parsed.data).forEach(([k, v]) => {
+        if (k === "anthropicKey") return;
+        localStorage.setItem(STORE_PREFIX + k, JSON.stringify(v));
+      });
+      onDone(true);
+    } catch { onDone(false); }
+  };
+  r.onerror = () => onDone(false);
+  r.readAsText(file);
+}
 
 // ── AUDIO HOOK ────────────────────────────────────────────────────
 function useAudio() {
@@ -1331,6 +1450,7 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
   const [skippedRecurring, setSkippedRecurring] = useState({});
   const [editRetention,setEditRetention]= useState(false);
   const [playDeck,     setPlayDeck]     = useState(null);
+  const [showSync,     setShowSync]     = useState(false);
 
   const myDecks  = decks.filter(d=>d.ownerId===currentUserId||d.scope==="shared");
   const selDecks = (schedule[selDay]||[]).map(id=>decks.find(d=>d.id===id)).filter(Boolean);
@@ -1514,6 +1634,7 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
           {calMode==="month" ? `${MONTHS[cursor.getMonth()]} ${cursor.getFullYear()}` : `Week of ${MONTHS[buildWeek()[0].getMonth()]} ${buildWeek()[0].getDate()}`}
         </div>
         <div style={{ display:"flex", gap:"5px", alignItems:"center" }}>
+          <button onClick={()=>setShowSync(true)} title="Calendar sync & backup" style={{ background:"rgba(99,179,237,0.08)", border:"1px solid rgba(99,179,237,0.22)", color:"#63B3ED", fontSize:"12px", width:"26px", height:"26px", borderRadius:"7px", cursor:"pointer", display:"flex", alignItems:"center", justifyContent:"center" }}>📅</button>
           <button onClick={()=>{ setCursor(new Date(today())); setSelDay(todayKey); }} style={{ background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.08)", color:"rgba(255,255,255,0.45)", fontFamily:"'DM Mono',monospace", fontSize:"10px", padding:"4px 9px", borderRadius:"7px", cursor:"pointer" }}>Today</button>
           <div style={{ display:"flex", gap:"2px", background:"rgba(255,255,255,0.04)", borderRadius:"7px", padding:"2px" }}>
             {[["month","Mo"],["week","Wk"]].map(([m,l])=><button key={m} onClick={()=>setCalMode(m)} style={{ background:calMode===m?"rgba(255,255,255,0.1)":"transparent", border:"none", color:calMode===m?"#f0ede8":"rgba(255,255,255,0.35)", fontFamily:"'DM Mono',monospace", fontSize:"10px", padding:"3px 8px", borderRadius:"5px", cursor:"pointer" }}>{l}</button>)}
@@ -1871,6 +1992,12 @@ function Planner({ decks, cards, schedule, onScheduleChange, quickCards, onQuick
           )}
         </div>
       </div>
+
+      {/* Calendar sync & backup sheet */}
+      {showSync&&(
+        <CalendarSyncSheet decks={decks} cards={cards} schedule={schedule} quickCards={quickCards}
+          currentUserId={currentUserId} onClose={()=>setShowSync(false)}/>
+      )}
 
       {/* Deck picker sheet */}
       {showPicker&&(
@@ -2305,6 +2432,100 @@ function VoiceReviewSheet({ cards, transcript, onConfirm, onDismiss }) {
             Add {active.length} card{active.length !== 1 ? "s" : ""} →
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CALENDAR SYNC & BACKUP SHEET ──────────────────────────────────
+function CalendarSyncSheet({ decks, cards, schedule, quickCards, currentUserId, onClose }) {
+  const [status, setStatus] = useState(null);
+  const fileRef = useRef(null);
+  const events = buildCalendarEvents({ decks, cards, schedule, quickCards, currentUserId });
+
+  function dayLabel(key) {
+    if (key === todayKey) return "Today";
+    const d = new Date(key + "T12:00:00");
+    return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+  }
+
+  function handleImport(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importBackup(file, ok => {
+      if (ok) { setStatus({ ok: true, msg: "Backup restored — reloading…" }); setTimeout(() => location.reload(), 900); }
+      else setStatus({ ok: false, msg: "Couldn't read that file — is it a DeckForge backup?" });
+    });
+    e.target.value = "";
+  }
+
+  return (
+    <div style={{ position:"fixed", inset:0, zIndex:200, background:"rgba(0,0,0,0.75)", backdropFilter:"blur(6px)", display:"flex", alignItems:"flex-end", justifyContent:"center" }} onClick={onClose}>
+      <div onClick={e=>e.stopPropagation()} style={{ background:"#141418", border:"1px solid rgba(255,255,255,0.09)", borderRadius:"20px 20px 0 0", padding:"20px 18px 36px", width:"100%", maxWidth:"500px", animation:"slide-up 0.28s ease", maxHeight:"88vh", overflowY:"auto" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"16px" }}>
+          <div>
+            <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"20px" }}>Calendar & Backup</div>
+            <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", marginTop:"2px", letterSpacing:"0.06em" }}>
+              EXPORT YOUR PLAN · KEEP YOUR DATA SAFE
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background:"rgba(255,255,255,0.06)", border:"1px solid rgba(255,255,255,0.09)", color:"rgba(255,255,255,0.4)", width:"30px", height:"30px", borderRadius:"8px", cursor:"pointer", fontSize:"14px" }}>✕</button>
+        </div>
+
+        {/* ── GOOGLE CALENDAR ── */}
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.1em", marginBottom:"7px" }}>GOOGLE CALENDAR</div>
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.38)", lineHeight:1.6, marginBottom:"10px" }}>
+          Download your next 30 days as an .ics file and import it in Google Calendar (Settings → Import & export), or add individual items with the ＋ buttons.
+        </div>
+        <button
+          onClick={() => { downloadFile(`deckforge-schedule-${todayKey}.ics`, buildICS(events), "text/calendar"); setStatus({ ok:true, msg:`${events.length} event${events.length!==1?"s":""} exported ✓` }); }}
+          disabled={events.length === 0}
+          style={{ width:"100%", padding:"12px", background:events.length?"linear-gradient(135deg,#63B3EDcc,#4FD1C5aa)":"rgba(255,255,255,0.04)", border:"none", borderRadius:"12px", color:events.length?"#0c0c10":"rgba(255,255,255,0.25)", fontFamily:"'DM Mono',monospace", fontWeight:500, fontSize:"12px", cursor:events.length?"pointer":"not-allowed", letterSpacing:"0.04em", marginBottom:"12px" }}>
+          📅 Download .ics — {events.length} upcoming event{events.length !== 1 ? "s" : ""}
+        </button>
+
+        {events.length === 0 ? (
+          <div style={{ textAlign:"center", padding:"14px 0", fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.2)", marginBottom:"14px" }}>
+            Nothing scheduled in the next 30 days
+          </div>
+        ) : (
+          <div style={{ display:"flex", flexDirection:"column", gap:"5px", maxHeight:"220px", overflowY:"auto", marginBottom:"14px" }}>
+            {events.map(ev => (
+              <div key={ev.id} style={{ display:"flex", alignItems:"center", gap:"9px", padding:"8px 11px", background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)", borderRadius:"10px" }}>
+                <div style={{ flex:1, minWidth:0 }}>
+                  <div style={{ fontFamily:"'DM Serif Display',serif", fontSize:"13px", color:"#f0ede8", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{ev.title}</div>
+                  <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", marginTop:"1px" }}>
+                    {ev.rrule ? "repeats " + (cards.find(c=>`recur-${c.id}`===ev.id)?.recurrence || "weekly") : dayLabel(ev.dayKey)}
+                  </div>
+                </div>
+                <a href={gcalUrl(ev)} target="_blank" rel="noopener noreferrer"
+                  style={{ background:"rgba(99,179,237,0.12)", border:"1px solid rgba(99,179,237,0.3)", color:"#63B3ED", fontFamily:"'DM Mono',monospace", fontSize:"9px", padding:"4px 9px", borderRadius:"7px", textDecoration:"none", whiteSpace:"nowrap", flexShrink:0 }}>＋ GCal</a>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── BACKUP ── */}
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.1em", marginBottom:"7px", marginTop:"4px" }}>BACKUP</div>
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.38)", lineHeight:1.6, marginBottom:"10px" }}>
+          Everything lives in this browser. Export a backup file to move devices or guard against cleared storage. Your API key is never included.
+        </div>
+        <div style={{ display:"flex", gap:"8px" }}>
+          <button onClick={() => { exportBackup(); setStatus({ ok:true, msg:"Backup downloaded ✓" }); }}
+            style={{ flex:1, padding:"11px", background:"rgba(104,211,145,0.12)", border:"1px solid rgba(104,211,145,0.3)", color:"#68D391", fontFamily:"'DM Mono',monospace", fontSize:"11px", borderRadius:"10px", cursor:"pointer", letterSpacing:"0.04em" }}>⬇ Export backup</button>
+          <button onClick={() => fileRef.current?.click()}
+            style={{ flex:1, padding:"11px", background:"rgba(246,173,85,0.1)", border:"1px solid rgba(246,173,85,0.28)", color:"#F6AD55", fontFamily:"'DM Mono',monospace", fontSize:"11px", borderRadius:"10px", cursor:"pointer", letterSpacing:"0.04em" }}>⬆ Restore backup</button>
+          <input ref={fileRef} type="file" accept="application/json,.json" onChange={handleImport} style={{ display:"none" }}/>
+        </div>
+
+        {status && (
+          <div style={{ marginTop:"12px", padding:"8px 12px", borderRadius:"9px", fontFamily:"'DM Mono',monospace", fontSize:"10px",
+            background: status.ok ? "rgba(104,211,145,0.1)" : "rgba(245,101,101,0.12)",
+            border: `1px solid ${status.ok ? "rgba(104,211,145,0.28)" : "rgba(245,101,101,0.3)"}`,
+            color: status.ok ? "#68D391" : "#F56565" }}>
+            {status.msg}
+          </div>
+        )}
       </div>
     </div>
   );
