@@ -55,7 +55,7 @@
 
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap');`;
-const VERSION = "0.24.0-beta";
+const VERSION = "0.25.0-beta";
 
 // ── PERSISTENCE ──────────────────────────────────────────────────
 const STORE_PREFIX = "deckforge.v1.";
@@ -418,12 +418,13 @@ function downloadFile(name, content, mime) {
 }
 
 // ── BACKUP / RESTORE ──────────────────────────────────────────────
-// The API key is deliberately excluded from backups.
+// Secrets (API key, brain sync token) are deliberately excluded from backups.
+const BACKUP_EXCLUDE = ["anthropicKey", "brainToken"];
 function exportBackup() {
   const data = {};
   try {
     Object.keys(localStorage)
-      .filter(k => k.startsWith(STORE_PREFIX) && k !== API_KEY_STORE)
+      .filter(k => k.startsWith(STORE_PREFIX) && !BACKUP_EXCLUDE.includes(k.slice(STORE_PREFIX.length)))
       .forEach(k => { try { data[k.slice(STORE_PREFIX.length)] = JSON.parse(localStorage.getItem(k)); } catch {} });
   } catch {}
   downloadFile(
@@ -440,7 +441,7 @@ function importBackup(file, onDone) {
       const parsed = JSON.parse(r.result);
       if (!parsed || parsed.app !== "deckforge" || typeof parsed.data !== "object") throw new Error("not a DeckForge backup");
       Object.entries(parsed.data).forEach(([k, v]) => {
-        if (k === "anthropicKey") return;
+        if (BACKUP_EXCLUDE.includes(k)) return;
         localStorage.setItem(STORE_PREFIX + k, JSON.stringify(v));
       });
       onDone(true);
@@ -2234,7 +2235,8 @@ function Planner({ decks, cards, schedule, onScheduleChange, deckTimes, onDeckTi
       {/* Calendar sync & backup sheet */}
       {showSync&&(
         <CalendarSyncSheet decks={decks} cards={cards} schedule={schedule} quickCards={quickCards}
-          deckTimes={deckTimes} currentUserId={currentUserId} onClose={()=>setShowSync(false)}/>
+          deckTimes={deckTimes} currentUserId={currentUserId} onClose={()=>setShowSync(false)}
+          snapshot={{ syncedAt:new Date().toISOString(), uid:currentUserId, cards, decks, schedule, deckTimes, quickCards, sessions:completedSessions.slice(-100) }}/>
       )}
 
       {/* Deck picker sheet */}
@@ -2266,6 +2268,34 @@ function Planner({ decks, cards, schedule, onScheduleChange, deckTimes, onDeckTi
 
 // ── VOICE CAPTURE ─────────────────────────────────────────────────
 // Floating mic button + transcript display
+// ── ASSISTANT BRAIN SYNC ──────────────────────────────────────────
+// The brain is an optional companion worker (see brain/README.md) that
+// receives state snapshots so it can send proactive check-ins.
+const BRAIN_URL_STORE   = STORE_PREFIX + "brainUrl";
+const BRAIN_TOKEN_STORE = STORE_PREFIX + "brainToken";
+const getBrainConfig = () => {
+  try { return { url: localStorage.getItem(BRAIN_URL_STORE) || "", token: localStorage.getItem(BRAIN_TOKEN_STORE) || "" }; }
+  catch { return { url: "", token: "" }; }
+};
+const setBrainConfig = (url, token) => {
+  try {
+    url   ? localStorage.setItem(BRAIN_URL_STORE, url)     : localStorage.removeItem(BRAIN_URL_STORE);
+    token ? localStorage.setItem(BRAIN_TOKEN_STORE, token) : localStorage.removeItem(BRAIN_TOKEN_STORE);
+  } catch {}
+};
+async function pushToBrain(snapshot) {
+  const { url, token } = getBrainConfig();
+  if (!url) return { ok: false, msg: "no brain configured" };
+  try {
+    const res = await fetch(url.replace(/\/+$/, "") + "/sync", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) },
+      body: JSON.stringify(snapshot),
+    });
+    return res.ok ? { ok: true, msg: "synced ✓" } : { ok: false, msg: "brain said " + res.status };
+  } catch (e) { return { ok: false, msg: "unreachable — check the URL" }; }
+}
+
 const API_KEY_STORE = STORE_PREFIX + "anthropicKey";
 const getApiKey   = () => { try { return localStorage.getItem(API_KEY_STORE) || ""; } catch { return ""; } };
 const setApiKey   = (k) => { try { k ? localStorage.setItem(API_KEY_STORE, k) : localStorage.removeItem(API_KEY_STORE); } catch {} };
@@ -2676,10 +2706,22 @@ function VoiceReviewSheet({ cards, transcript, onConfirm, onDismiss }) {
 }
 
 // ── CALENDAR SYNC & BACKUP SHEET ──────────────────────────────────
-function CalendarSyncSheet({ decks, cards, schedule, quickCards, deckTimes, currentUserId, onClose }) {
+function CalendarSyncSheet({ decks, cards, schedule, quickCards, deckTimes, currentUserId, onClose, snapshot }) {
   const [status, setStatus] = useState(null);
   const fileRef = useRef(null);
+  const initialBrain = getBrainConfig();
+  const [brainUrl,   setBrainUrl]   = useState(initialBrain.url);
+  const [brainToken, setBrainToken] = useState(initialBrain.token);
+  const [syncing,    setSyncing]    = useState(false);
   const events = buildCalendarEvents({ decks, cards, schedule, quickCards, deckTimes, currentUserId });
+
+  async function syncNow() {
+    setBrainConfig(brainUrl.trim(), brainToken.trim());
+    setSyncing(true);
+    const res = await pushToBrain(snapshot);
+    setSyncing(false);
+    setStatus({ ok: res.ok, msg: res.ok ? "Brain " + res.msg : "Brain sync failed: " + res.msg });
+  }
 
   function dayLabel(key) {
     if (key === todayKey) return "Today";
@@ -2743,6 +2785,24 @@ function CalendarSyncSheet({ decks, cards, schedule, quickCards, deckTimes, curr
             ))}
           </div>
         )}
+
+        {/* ── ASSISTANT BRAIN ── */}
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.1em", marginBottom:"7px", marginTop:"4px" }}>🧠 ASSISTANT BRAIN</div>
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"10px", color:"rgba(255,255,255,0.38)", lineHeight:1.6, marginBottom:"10px" }}>
+          Connect your DeckForge Brain worker for evening check-ins on Telegram (see brain/README.md). The app syncs automatically once configured.
+        </div>
+        <div style={{ display:"flex", flexDirection:"column", gap:"7px", marginBottom:"9px" }}>
+          <input value={brainUrl} onChange={e=>setBrainUrl(e.target.value)} onBlur={()=>setBrainConfig(brainUrl.trim(), brainToken.trim())} placeholder="https://deckforge-brain.your-name.workers.dev"
+            style={{ width:"100%", padding:"9px 11px", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"9px", color:"#f0ede8", fontFamily:"'DM Mono',monospace", fontSize:"11px", outline:"none", boxSizing:"border-box" }}/>
+          <div style={{ display:"flex", gap:"7px" }}>
+            <input type="password" value={brainToken} onChange={e=>setBrainToken(e.target.value)} onBlur={()=>setBrainConfig(brainUrl.trim(), brainToken.trim())} placeholder="sync token"
+              style={{ flex:1, padding:"9px 11px", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"9px", color:"#f0ede8", fontFamily:"'DM Mono',monospace", fontSize:"11px", outline:"none", boxSizing:"border-box", minWidth:0 }}/>
+            <button onClick={syncNow} disabled={!brainUrl.trim()||syncing}
+              style={{ padding:"9px 14px", background:brainUrl.trim()?"rgba(183,148,244,0.14)":"rgba(255,255,255,0.04)", border:`1px solid ${brainUrl.trim()?"rgba(183,148,244,0.35)":"rgba(255,255,255,0.08)"}`, color:brainUrl.trim()?"#B794F4":"rgba(255,255,255,0.25)", fontFamily:"'DM Mono',monospace", fontSize:"11px", borderRadius:"9px", cursor:brainUrl.trim()&&!syncing?"pointer":"not-allowed", whiteSpace:"nowrap", flexShrink:0 }}>
+              {syncing?"Syncing…":"Sync now"}
+            </button>
+          </div>
+        </div>
 
         {/* ── BACKUP ── */}
         <div style={{ fontFamily:"'DM Mono',monospace", fontSize:"9px", color:"rgba(255,255,255,0.28)", letterSpacing:"0.1em", marginBottom:"7px", marginTop:"4px" }}>BACKUP</div>
@@ -2877,6 +2937,15 @@ function App() {
       return kept.length === p.length ? p : kept;
     });
   }, []);
+
+  // Auto-push state to the assistant brain (if configured), debounced
+  useEffect(() => {
+    if (!getBrainConfig().url) return;
+    const t = setTimeout(() => {
+      pushToBrain({ syncedAt: new Date().toISOString(), uid, cards, decks, schedule, deckTimes, quickCards, sessions: completedSessions.slice(-100) });
+    }, 4000);
+    return () => clearTimeout(t);
+  }, [cards, decks, schedule, deckTimes, quickCards, completedSessions, uid]);
 
   // ── Voice capture ──
   const [voiceCards,    setVoiceCards]    = useState(null); // extracted cards pending review

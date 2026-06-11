@@ -1,0 +1,27 @@
+name = "deckforge-brain"
+main = "worker.js"
+compatibility_date = "2026-06-01"
+
+# Cron is UTC. "0 1 * * *" = 9:00 PM Eastern Daylight Time.
+# Adjust for your timezone (and note DST shifts it by an hour).
+[triggers]
+crons = ["0 1 * * *"]
+
+# Create with:  npx wrangler kv namespace create BRAIN_KV
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "BRAIN_KV"
+id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+
+[vars]
+TIMEZONE = "America/New_York"
+GOOGLE_CALENDAR_ID = "your-email@gmail.com"
+USER_NOTES = "Wants to wake by 10am and be asleep before 1am. Prefers concrete suggestions over open questions."
+TELEGRAM_CHAT_ID = "REPLACE_WITH_YOUR_CHAT_ID"
+
+# Secrets — set these with `npx wrangler secret put <NAME>` (never commit them):
+#   ANTHROPIC_API_KEY        - from console.anthropic.com (use a workspace with a spend limit!)
+#   TELEGRAM_BOT_TOKEN       - from @BotFather
+#   GOOGLE_SERVICE_ACCOUNT   - the full service-account JSON, pasted as one line
+#   SYNC_TOKEN               - any long random string; same value goes in the DeckForge app
+#   TELEGRAM_WEBHOOK_SECRET  - any long random string; used when registering the webhook
