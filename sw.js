@@ -1,6 +1,6 @@
 // DeckForge service worker — network-first for the app shell so updates land,
 // cache-first for static assets (CDN scripts, fonts) so it works offline.
-const CACHE = "deckforge-v0.24.0";
+const CACHE = "deckforge-v0.26.0";
 const CORE = ["./", "./index.html", "./manifest.json", "./icon.svg"];
 
 self.addEventListener("install", (e) => {

@@ -2,8 +2,9 @@
 
 The proactive assistant layer for DeckForge. A single Cloudflare Worker (free tier) that:
 
+- **9am morning brief** — today's calendar, today's plan, and a suggested first card to get moving.
 - **9pm check-in** — reads tomorrow's Google Calendar and your latest DeckForge plan, then Claude composes one short Telegram message: *"Lunch with your mom at noon — alarm set? Two cards left from today; punt them?"*
-- **Talk back** — reply to the bot in plain language. Claude answers with full context and can **create calendar events** for you ("block 30 minutes tomorrow at 10 for prep" → done).
+- **Talk back** — reply to the bot in plain language. Claude answers with full context and can **create calendar events** ("block 30 minutes tomorrow at 10 for prep" → done) and **capture tasks into DeckForge** ("I need to buy Jackson's insulin tomorrow" → appears as a quick card next time the app opens).
 - **Stays in sync** — the DeckForge app pushes its state here automatically, so the brain always knows your plan.
 
 Costs: Cloudflare free tier covers all of it. Claude usage is ~1–3¢/day on the default model. Your API key lives in Worker secrets — never in a browser.
@@ -55,19 +56,23 @@ In DeckForge → Planner → 📅 → **Assistant Brain**: paste the worker URL 
 ```sh
 curl -X POST "https://<your-worker>.workers.dev/checkin" \
   -H "Authorization: Bearer <SYNC_TOKEN>"
+# or the morning brief:
+curl -X POST "https://<your-worker>.workers.dev/checkin?mode=morning" \
+  -H "Authorization: Bearer <SYNC_TOKEN>"
 ```
-You should get the evening check-in on Telegram within a few seconds. Then reply to it and have a conversation.
+You should get the message on Telegram within a few seconds. Then reply to it and have a conversation — try "add buy dog food to tomorrow" and watch it appear in the app.
 
 ---
 
-## What it can and can't do (v1)
+## What it can and can't do (v2)
 
 | Can | Can't yet |
 |---|---|
 | Read your calendar (next 36h) | Read further ahead / multiple calendars |
 | Create calendar events & reminder blocks | Edit or delete events |
-| See your full DeckForge plan | Modify DeckForge cards (snapshot is read-only) |
-| Nightly check-in + free-form chat | Morning brief (trivial to add: second cron + prompt) |
+| See your full DeckForge plan | Edit or complete existing cards |
+| Queue new tasks into DeckForge from chat | Push tasks while the app is closed (they apply on next open) |
+| Morning brief + nightly check-in + free-form chat | Voice messages (text only for now) |
 
 ## Tuning
 

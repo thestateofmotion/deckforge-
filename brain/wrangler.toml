@@ -2,10 +2,12 @@ name = "deckforge-brain"
 main = "worker.js"
 compatibility_date = "2026-06-01"
 
-# Cron is UTC. "0 1 * * *" = 9:00 PM Eastern Daylight Time.
-# Adjust for your timezone (and note DST shifts it by an hour).
+# Cron is UTC. Mode picks itself from local time: a trigger that fires before
+# noon (your TIMEZONE) sends the morning brief, after noon the evening check-in.
+# "0 13 * * *" = 9:00 AM EDT (morning brief), "0 1 * * *" = 9:00 PM EDT (check-in).
+# Adjust for your timezone (and note DST shifts these by an hour).
 [triggers]
-crons = ["0 1 * * *"]
+crons = ["0 13 * * *", "0 1 * * *"]
 
 # Create with:  npx wrangler kv namespace create BRAIN_KV
 # then paste the returned id below.

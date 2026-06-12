@@ -2,7 +2,10 @@
 
 **Card · Deck · Play** — a card-based household planner. Turn tasks into cards, build decks for different parts of your life, budget your day by time *and* energy, then play through your deck with a focus timer.
 
-Current version: **v0.25.0-beta**
+Current version: **v0.26.0-beta**
+
+**New here? [`SETUP.md`](SETUP.md) is the complete checklist** — from zero to a
+live app with voice capture and a Telegram assistant in about an hour.
 
 ## Running it
 
@@ -29,7 +32,7 @@ React and Babel are loaded from a CDN and JSX is transformed in the browser, so 
 - **Weekly review** — a Review tab with completed counts, focus time, and energy spent vs. the prior week, a minutes-per-day chart, and a per-category time breakdown.
 - **Backup & restore** — export all your data as a JSON file and restore it on another device or after cleared browser storage. API keys are never included in backups.
 - **Installable PWA** — a web app manifest and service worker make DeckForge installable to your home screen and usable offline after the first load.
-- **🧠 Assistant Brain (optional)** — a companion Cloudflare Worker that sends you a nightly Telegram check-in ("lunch with your mom at noon tomorrow — alarm set?") built from your Google Calendar and your DeckForge plan, and answers replies conversationally — including creating calendar events for you. The app auto-syncs its state to the brain once connected. Setup guide: [`brain/README.md`](brain/README.md).
+- **🧠 Assistant Brain (optional)** — a companion Cloudflare Worker that sends a morning brief and a nightly check-in on Telegram ("lunch with your mom at noon tomorrow — alarm set?") built from your Google Calendar and your DeckForge plan. Reply conversationally: it can create calendar events and capture tasks straight into DeckForge from chat. The app auto-syncs its state to the brain once connected. Setup guide: [`brain/README.md`](brain/README.md).
 
 ## Data & privacy
 

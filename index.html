@@ -55,7 +55,7 @@
 
 
 const FONTS = `@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=DM+Mono:wght@300;400;500&family=Bebas+Neue&display=swap');`;
-const VERSION = "0.25.0-beta";
+const VERSION = "0.26.0-beta";
 
 // ── PERSISTENCE ──────────────────────────────────────────────────
 const STORE_PREFIX = "deckforge.v1.";
@@ -3013,6 +3013,53 @@ function App() {
   useEffect(()=>{ setVisible(false); const id=setTimeout(()=>setVisible(true),80); return()=>clearTimeout(id); },[view,filterCat,uid]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(()=>setToast(null),2800); };
+
+  // Pull tasks the assistant queued from Telegram into quick cards
+  useEffect(() => {
+    let stopped = false;
+    async function pullInbox() {
+      const { url, token } = getBrainConfig();
+      if (!url || stopped) return;
+      try {
+        const base = url.replace(/\/+$/, "");
+        const res = await fetch(base + "/inbox", { headers: token ? { authorization: "Bearer " + token } : {} });
+        if (!res.ok) return;
+        const { items } = await res.json();
+        if (!Array.isArray(items) || !items.length) return;
+        const applied = loadStored("appliedInbox", []);
+        const fresh = items.filter(it => it?.id && it?.title && !applied.includes(it.id));
+        if (fresh.length) {
+          setQuickCards(prev => {
+            const next = { ...prev };
+            fresh.forEach((it, i) => {
+              const day = it.day === "tomorrow" ? tomorrowKey
+                : /^\d{4}-\d{2}-\d{2}$/.test(it.day) ? it.day
+                : todayKey;
+              next[day] = [...(next[day] || []), {
+                id: "q" + (Date.now() + i), title: String(it.title).slice(0, 120),
+                category: CATS[it.category] ? it.category : "Home",
+                duration: Number(it.durationMinutes) || 25,
+                time: it.time || null, done: false,
+              }];
+            });
+            return next;
+          });
+          try { localStorage.setItem(STORE_PREFIX + "appliedInbox", JSON.stringify([...applied, ...fresh.map(i => i.id)].slice(-200))); } catch {}
+          showToast(`${fresh.length} task${fresh.length > 1 ? "s" : ""} from your assistant 📨`);
+        }
+        fetch(base + "/inbox/ack", {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(token ? { authorization: "Bearer " + token } : {}) },
+          body: JSON.stringify({ ids: items.map(i => i.id) }),
+        }).catch(() => {});
+      } catch {}
+    }
+    pullInbox();
+    const onFocus = () => pullInbox();
+    window.addEventListener("focus", onFocus);
+    const iv = setInterval(pullInbox, 5 * 60 * 1000);
+    return () => { stopped = true; window.removeEventListener("focus", onFocus); clearInterval(iv); };
+  }, []);
 
   function saveDeck(data) {
     if(deckModal==="new"){ const nd={id:Date.now(),ownerId:uid,...data}; setDecks(p=>[...p,nd]); setBuilderDid(nd.id); showToast(`"${data.name}" created ✓`); }
